@@ -10,6 +10,10 @@ qt_standard_project_setup(REQUIRES 6.8)
 
 qt_add_executable(appMosfer
     main.cpp
+    common/usb/usb_capture/usb_capture_worker.cpp
+    common/usb/usb_parse/usb_parse_worker.cpp
+    common/usb/usb_pipeline.cpp
+    common/usb/usb_ui_controller.cpp
 )
 
 qt_add_qml_module(appMosfer
@@ -28,6 +32,11 @@ set_target_properties(appMosfer PROPERTIES
 
 target_link_libraries(appMosfer
     PRIVATE Qt6::Quick
+)
+
+target_include_directories(appMosfer
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}
 )
 
 add_subdirectory(platform/linux)

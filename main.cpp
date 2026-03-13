@@ -1,27 +1,24 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QTimer>
 
-#include "win_usb.hpp"
+#include "common/usb/usb_ui_controller.hpp"
 
 int main(int argc, char* argv[]) {
 	QGuiApplication app(argc, argv);
 
 	QQmlApplicationEngine engine;
+	UsbUiController usb_controller;
+	usb_controller.initialize();
+	engine.rootContext()->setContextProperty("usbController", &usb_controller);
 
-	WIN_USB& win_usb = WIN_USB::instance();
+	QTimer poll_timer;
+	poll_timer.setInterval(200);
+	QObject::connect(&poll_timer, &QTimer::timeout, &usb_controller, &UsbUiController::refresh);
+	poll_timer.start();
 
-	bool is_usbpcap_installed = false;
-	win_usb.is_usbpcap_upper_filter_installed(is_usbpcap_installed);
-	auto upper_filters = win_usb.get_usbpcap_upper_filters();
-
-	QVariantList q_filters;
-	for (const auto& filter : upper_filters) {
-		q_filters.append(QString::fromStdString(filter));
-	}
-
-	engine.rootContext()->setContextProperty("isUsbPcapInstalled", is_usbpcap_installed);
-	engine.rootContext()->setContextProperty("usbpcapUpperFilters", q_filters);
+	QObject::connect(&app, &QCoreApplication::aboutToQuit, &usb_controller, &UsbUiController::stopCapture);
 
 	QObject::connect(
 		&engine,

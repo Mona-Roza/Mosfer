@@ -16,7 +16,10 @@ win_usb_err_t WIN_USB::load_ntdll() {
 	if (nt_dll) return WIN_USB_SUCCESS;	 // Already loaded
 
 	nt_dll = LoadLibraryW(L"ntdll.dll");
-	if (!nt_dll) return WIN_USB_ERROR_LOAD_LIBRARY;
+	if (!nt_dll) {
+		last_win_error_.store(GetLastError());
+		return WIN_USB_ERROR_LOAD_LIBRARY;
+	}
 
 	nt_query_dir = reinterpret_cast<nt_query_dir_fn_t>(GetProcAddress(nt_dll, "NtQueryDirectoryObject"));
 	nt_open_dir	 = reinterpret_cast<nt_open_dir_fn_t>(GetProcAddress(nt_dll, "NtOpenDirectoryObject"));
@@ -115,6 +118,136 @@ win_usb_err_t WIN_USB::enumerate_usbpcap_upper_filters() {
 std::list<std::string> WIN_USB::get_usbpcap_upper_filters() {
 	std::lock_guard<std::mutex> lock(this->mtx);  // Thread safe
 	return upper_filter;
+}
+
+win_usb_err_t WIN_USB::open_capture_device(const std::string& device_path, HANDLE& capture_handle) {
+	std::lock_guard<std::mutex> lock(mtx);
+
+	capture_handle = CreateFileA(
+		device_path.c_str(),
+		GENERIC_READ | GENERIC_WRITE,
+		0,
+		nullptr,
+		OPEN_EXISTING,
+		FILE_ATTRIBUTE_NORMAL,
+		nullptr);
+
+	if (capture_handle == INVALID_HANDLE_VALUE) {
+		last_win_error_.store(GetLastError());
+		return WIN_USB_ERROR_OPEN_DEVICE;
+	}
+
+	win_usb_err_t init_rc = initialize_capture_session(capture_handle);
+	if (init_rc != WIN_USB_SUCCESS) {
+		last_win_error_.store(GetLastError());
+		CloseHandle(capture_handle);
+		capture_handle = INVALID_HANDLE_VALUE;
+		return init_rc;
+	}
+
+	last_win_error_.store(0);
+
+	return WIN_USB_SUCCESS;
+}
+
+win_usb_err_t WIN_USB::initialize_capture_session(HANDLE capture_handle, UINT32 snap_len, UINT32 buffer_len, bool capture_all) {
+	if (capture_handle == nullptr || capture_handle == INVALID_HANDLE_VALUE) {
+		last_win_error_.store(ERROR_INVALID_HANDLE);
+		return WIN_USB_ERROR_CONFIG_DEVICE;
+	}
+
+	DWORD bytes_ret = 0;
+	usbpcap_ioctl_size size_data{};
+	size_data.size = snap_len;
+
+	if (!DeviceIoControl(capture_handle,
+						 IOCTL_USBPCAP_SET_SNAPLEN_SIZE,
+						 &size_data,
+						 sizeof(size_data),
+						 nullptr,
+						 0,
+						 &bytes_ret,
+						 nullptr)) {
+		last_win_error_.store(GetLastError());
+		return WIN_USB_ERROR_CONFIG_DEVICE;
+	}
+
+	size_data.size = buffer_len;
+	if (!DeviceIoControl(capture_handle,
+						 IOCTL_USBPCAP_SETUP_BUFFER,
+						 &size_data,
+						 sizeof(size_data),
+						 nullptr,
+						 0,
+						 &bytes_ret,
+						 nullptr)) {
+		last_win_error_.store(GetLastError());
+		return WIN_USB_ERROR_CONFIG_DEVICE;
+	}
+
+	usbpcap_address_filter filter{};
+	filter.filter_all = capture_all ? TRUE : FALSE;
+
+	if (!DeviceIoControl(capture_handle,
+						 IOCTL_USBPCAP_START_FILTERING,
+						 &filter,
+						 sizeof(filter),
+						 nullptr,
+						 0,
+						 &bytes_ret,
+						 nullptr)) {
+		last_win_error_.store(GetLastError());
+		return WIN_USB_ERROR_CONFIG_DEVICE;
+	}
+
+	last_win_error_.store(0);
+
+	return WIN_USB_SUCCESS;
+}
+
+win_usb_err_t WIN_USB::close_capture_device(HANDLE capture_handle) {
+	if (capture_handle == nullptr || capture_handle == INVALID_HANDLE_VALUE) {
+		return WIN_USB_SUCCESS;
+	}
+
+	CloseHandle(capture_handle);
+	return WIN_USB_SUCCESS;
+}
+
+win_usb_err_t WIN_USB::read_capture_packet(HANDLE capture_handle, std::vector<unsigned char>& packet, DWORD max_bytes) {
+	if (capture_handle == nullptr || capture_handle == INVALID_HANDLE_VALUE || max_bytes == 0) {
+		packet.clear();
+		last_win_error_.store(ERROR_INVALID_PARAMETER);
+		return WIN_USB_ERROR_READ_DEVICE;
+	}
+
+	packet.assign(max_bytes, 0);
+
+	DWORD bytes_read = 0;
+	BOOL ok			 = ReadFile(capture_handle, packet.data(), max_bytes, &bytes_read, nullptr);
+	if (!ok) {
+		const DWORD err = GetLastError();
+		packet.clear();
+		last_win_error_.store(err);
+		if (err == ERROR_NO_DATA) {
+			return WIN_USB_ERROR_NO_DATA;
+		}
+		return WIN_USB_ERROR_READ_DEVICE;
+	}
+
+	if (bytes_read == 0) {
+		packet.clear();
+		last_win_error_.store(ERROR_NO_DATA);
+		return WIN_USB_ERROR_NO_DATA;
+	}
+
+	packet.resize(bytes_read);
+	last_win_error_.store(0);
+	return WIN_USB_SUCCESS;
+}
+
+DWORD WIN_USB::get_last_win_error() const {
+	return last_win_error_.load();
 }
 
 win_usb_err_t WIN_USB::is_usbpcap_upper_filter_installed(bool& installed) {
